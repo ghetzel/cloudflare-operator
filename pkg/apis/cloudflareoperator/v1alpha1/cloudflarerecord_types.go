@@ -35,9 +35,14 @@ type CloudflareRecordSpec struct {
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Default=A
-	Type    RecordType `json:"type"`
-	Name    string     `json:"name"`
-	Content string     `json:"content"`
+	Type RecordType `json:"type"`
+	Name string     `json:"name"`
+
+	// +kubebuilder:validation:Optional
+	Content string `json:"content"`
+
+	// +kubebuilder:validation:Optional
+	Service string `json:"service"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Default=1
@@ -55,6 +60,7 @@ type CloudflareRecordStatus struct {
 	Type     RecordType `json:"type"`
 	Name     string     `json:"name"`
 	Content  string     `json:"content"`
+	Service  string     `json:"service"`
 	TTL      int        `json:"ttl"`
 	Priority int        `json:"priority"`
 	Proxied  bool       `json:"proxied"`

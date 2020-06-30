@@ -8,8 +8,10 @@ import (
 
 	"github.com/cloudflare/cloudflare-go"
 	cloudflareoperatorv1alpha1 "github.com/ghetzel/cloudflare-operator/pkg/apis/cloudflareoperator/v1alpha1"
+	slog "github.com/ghetzel/go-stockutil/log"
 	"github.com/ghetzel/go-stockutil/sliceutil"
-	"github.com/go-logr/logr"
+	"github.com/ghetzel/go-stockutil/stringutil"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -69,12 +71,11 @@ type ReconcileCloudflareRecord struct {
 // Reconcile reads that state of the cluster for a CloudflareRecord object and makes changes based on the state read
 // and what is in the CloudflareRecord.Spec
 func (r *ReconcileCloudflareRecord) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	reqLogger := log.WithValues("Request.Namespace", request.Namespace, "Request.Name", request.Name)
-	reqLogger.Info("Reconciling CloudflareRecord")
+	var ctx = context.Background()
 
 	// Fetch the CloudflareRecord instance
 	var instance = new(cloudflareoperatorv1alpha1.CloudflareRecord)
-	err := r.client.Get(context.Background(), request.NamespacedName, instance)
+	err := r.client.Get(ctx, request.NamespacedName, instance)
 
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -87,28 +88,57 @@ func (r *ReconcileCloudflareRecord) Reconcile(request reconcile.Request) (reconc
 		return reconcile.Result{}, err
 	}
 
-	if r.cf == nil {
-		var cfaccount = os.Getenv(`CLOUDFLARE_ACCOUNT`)
-		var apikey = os.Getenv(`CLOUDFLARE_APIKEY`)
+	if err := r.setupCloudflareClient(); err != nil {
+		return reconcile.Result{}, err
+	}
 
-		if cfaccount == `` {
-			return reconcile.Result{}, fmt.Errorf("Must provide CLOUDFLARE_ACCOUNT environment variable")
+	var targetAddress string
+
+	// if the instance names a service, now is the time to retrieve that service
+	if instance.Spec.Service != `` {
+		var service = new(corev1.Service)
+		var svcNamespace, svcName = stringutil.SplitPairTrailing(instance.Spec.Service, `/`)
+
+		if svcNamespace == `` {
+			svcNamespace = instance.Namespace
 		}
 
-		if apikey == `` {
-			return reconcile.Result{}, fmt.Errorf("Must provide CLOUDFLARE_APIKEY environment variable")
-		}
+		if err := r.client.Get(ctx, client.ObjectKey{
+			Namespace: svcNamespace,
+			Name:      svcName,
+		}, service); err == nil {
 
-		// setup CloudFlare API
-		if cf, err := cloudflare.New(apikey, cfaccount); err == nil {
-			r.cf = cf
+			switch service.Spec.Type {
+			case corev1.ServiceTypeLoadBalancer:
+				for _, ingress := range service.Status.LoadBalancer.Ingress {
+					if ingress.Hostname != `` {
+						targetAddress = ingress.Hostname
+						break
+					} else if ingress.IP != `` {
+						targetAddress = ingress.IP
+						break
+					}
+				}
+			case corev1.ServiceTypeExternalName:
+				if en := service.Spec.ExternalName; en != `` {
+					targetAddress = en
+				}
+			default:
+				if cip := service.Spec.ClusterIP; cip != `` {
+					targetAddress = cip
+				}
+			}
 		} else {
 			return reconcile.Result{}, err
 		}
+
+		if targetAddress == `` {
+			return reconcile.Result{}, fmt.Errorf("Service target specified, but no usable address found")
+		}
 	}
 
-	if r.cf == nil {
-		return reconcile.Result{}, fmt.Errorf("Failed to setup CloudFlare API")
+	if targetAddress == `` {
+		targetAddress = instance.Spec.Content
 	}
 
 	// get the zone referred to by the instance we're reconciling
@@ -118,30 +148,37 @@ func (r *ReconcileCloudflareRecord) Reconcile(request reconcile.Request) (reconc
 		return reconcile.Result{}, err
 	}
 
-	if rr, hasChanged, err := r.firstRecordByInstance(zoneID, instance); err == nil {
+	if rr, hasChanged, err := r.firstRecordByInstance(zoneID, targetAddress, instance); err == nil {
 		if instance.GetDeletionTimestamp() == nil {
-			reqLogger.Info(fmt.Sprintf("Checking Cloudflare DNS record [%s] %s", rr.Type, rr.Name))
+			slog.Debugf("Checking Cloudflare DNS record: %v %s", rr.Type, rr.Name)
 
 			if rr.ID != `` {
 				// only perform the update call if any of the spec data differs from what's already in CloudFlare
 				if hasChanged {
-					reqLogger.Info("Updating Cloudflare DNS record", "Name", rr.Name, "Type", rr.Type, "Content", rr.Content, "Proxied", rr.Proxied)
+					if rr.Proxied {
+						slog.Noticef("Updating Cloudflare DNS record: %v %s -> {CloudFlare} -> %v", rr.Type, rr.Name, rr.Content)
+					} else {
+						slog.Noticef("Updating Cloudflare DNS record: %v %s -> %v", rr.Type, rr.Name, rr.Content)
+					}
 
 					rr.Name = `` // let the CloudFlare library figure this out
 
 					err = r.cf.UpdateDNSRecord(zoneID, rr.ID, rr)
-				} else {
-					reqLogger.Info("No changes necessary", "Name", rr.Name, "Type", rr.Type, "Content", rr.Content, "Proxied", rr.Proxied)
 				}
 			} else {
-				reqLogger.Info("Creating Cloudflare DNS record", "Name", rr.Name, "Type", rr.Type, "Content", rr.Content, "Proxied", rr.Proxied)
+				if rr.Proxied {
+					slog.Noticef("Creating Cloudflare DNS record: %v %s -> {CloudFlare} -> %v", rr.Type, rr.Name, rr.Content)
+				} else {
+					slog.Noticef("Creating Cloudflare DNS record: %v %s -> %v", rr.Type, rr.Name, rr.Content)
+				}
+
 				_, err = r.cf.CreateDNSRecord(zoneID, rr)
 			}
 		} else if rr.ID != `` {
-			reqLogger.Info(fmt.Sprintf("Removing Cloudflare DNS record [%s] %s", rr.Type, rr.Name))
+			slog.Warningf("Removing Cloudflare DNS record %v %s", rr.Type, rr.Name)
 
 			if sliceutil.ContainsString(instance.GetFinalizers(), cloudflareRecordFinalizer) {
-				if err := r.finalize(reqLogger, zoneID, rr.ID); err != nil {
+				if err := r.finalize(zoneID, rr.ID); err != nil {
 					return reconcile.Result{}, err
 				}
 
@@ -156,7 +193,7 @@ func (r *ReconcileCloudflareRecord) Reconcile(request reconcile.Request) (reconc
 
 		// Add finalizer for this CR
 		if !sliceutil.ContainsString(instance.GetFinalizers(), cloudflareRecordFinalizer) {
-			if err := r.addFinalizer(reqLogger, instance); err != nil {
+			if err := r.addFinalizer(instance); err != nil {
 				return reconcile.Result{}, err
 			}
 		}
@@ -167,20 +204,48 @@ func (r *ReconcileCloudflareRecord) Reconcile(request reconcile.Request) (reconc
 	}
 }
 
-func (r *ReconcileCloudflareRecord) addFinalizer(reqLogger logr.Logger, record *cloudflareoperatorv1alpha1.CloudflareRecord) error {
-	reqLogger.Info("Adding Finalizer for CloudflareRecord")
+func (r *ReconcileCloudflareRecord) setupCloudflareClient() error {
+	if r.cf == nil {
+		var cfaccount = os.Getenv(`CLOUDFLARE_ACCOUNT`)
+		var apikey = os.Getenv(`CLOUDFLARE_APIKEY`)
+
+		if cfaccount == `` {
+			return fmt.Errorf("Must provide CLOUDFLARE_ACCOUNT environment variable")
+		}
+
+		if apikey == `` {
+			return fmt.Errorf("Must provide CLOUDFLARE_APIKEY environment variable")
+		}
+
+		// setup CloudFlare API
+		if cf, err := cloudflare.New(apikey, cfaccount); err == nil {
+			r.cf = cf
+		} else {
+			return err
+		}
+	}
+
+	if r.cf == nil {
+		return fmt.Errorf("Failed to setup CloudFlare API")
+	}
+
+	return nil
+}
+
+func (r *ReconcileCloudflareRecord) addFinalizer(record *cloudflareoperatorv1alpha1.CloudflareRecord) error {
+	slog.Debugf("Adding Finalizer for CloudflareRecord")
 	controllerutil.AddFinalizer(record, cloudflareRecordFinalizer)
 
 	// Update CR
 	err := r.client.Update(context.Background(), record)
 	if err != nil {
-		reqLogger.Error(err, "Failed to update CloudflareRecord with finalizer")
+		slog.Errorf("Failed to update CloudflareRecord with finalizer: %v", err)
 		return err
 	}
 	return nil
 }
 
-func (r *ReconcileCloudflareRecord) firstRecordByInstance(zoneID string, record *cloudflareoperatorv1alpha1.CloudflareRecord) (cloudflare.DNSRecord, bool, error) {
+func (r *ReconcileCloudflareRecord) firstRecordByInstance(zoneID string, targetAddress string, record *cloudflareoperatorv1alpha1.CloudflareRecord) (cloudflare.DNSRecord, bool, error) {
 	var hasChanged bool
 
 	// try to find an existing DNS record for this Type+Name
@@ -188,7 +253,7 @@ func (r *ReconcileCloudflareRecord) firstRecordByInstance(zoneID string, record 
 		var rr = cloudflare.DNSRecord{
 			Type:    string(record.Spec.Type),
 			Name:    record.Spec.Name,
-			Content: record.Spec.Content,
+			Content: targetAddress,
 			TTL:     record.Spec.TTL,
 			Proxied: record.Spec.Proxied,
 			ZoneID:  zoneID,
@@ -225,7 +290,7 @@ func (r *ReconcileCloudflareRecord) firstRecordByInstance(zoneID string, record 
 	}
 }
 
-func (r *ReconcileCloudflareRecord) finalize(reqLogger logr.Logger, zoneID string, recordID string) error {
+func (r *ReconcileCloudflareRecord) finalize(zoneID string, recordID string) error {
 	if r.cf == nil {
 		return fmt.Errorf("CloudFlare API not available")
 	} else {

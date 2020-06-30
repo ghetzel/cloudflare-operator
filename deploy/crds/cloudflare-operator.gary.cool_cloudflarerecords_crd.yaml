@@ -39,6 +39,8 @@ spec:
                 type: integer
               proxied:
                 type: boolean
+              service:
+                type: string
               ttl:
                 type: integer
               type:
@@ -66,7 +68,6 @@ spec:
               zone:
                 type: string
             required:
-            - content
             - name
             - proxied
             - zone
@@ -82,6 +83,8 @@ spec:
                 type: integer
               proxied:
                 type: boolean
+              service:
+                type: string
               ttl:
                 type: integer
               type:
@@ -113,6 +116,7 @@ spec:
             - name
             - priority
             - proxied
+            - service
             - ttl
             - type
             - zone
