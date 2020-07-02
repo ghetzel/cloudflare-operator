@@ -15,3 +15,6 @@ regen:
 
 crds:
 	operator-sdk generate crds
+
+push:
+	docker push $(CONTAINER)

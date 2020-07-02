@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/cloudflare/cloudflare-go"
@@ -80,6 +81,7 @@ func (r *ReconcileCloudflareRecord) Reconcile(request reconcile.Request) (reconc
 
 	// Fetch the CloudflareRecord instance
 	var instance = new(cloudflareoperatorv1alpha1.CloudflareRecord)
+	var status cloudflareoperatorv1alpha1.CloudflareRecordStatus
 	err := r.client.Get(ctx, request.NamespacedName, instance)
 
 	if err != nil {
@@ -144,6 +146,23 @@ func (r *ReconcileCloudflareRecord) Reconcile(request reconcile.Request) (reconc
 	}
 
 	if rr, hasChanged, err := r.firstRecordByInstance(zoneID, targetAddress, instance); err == nil {
+		status.Type = cloudflareoperatorv1alpha1.RecordType(rr.Type)
+		status.Zone = rr.ZoneName
+		status.ZoneID = rr.ZoneID
+		status.Name = rr.Name
+		status.Content = rr.Content
+		status.Proxied = rr.Proxied
+		status.Priority = rr.Priority
+		status.TTL = rr.TTL
+
+		if !reflect.DeepEqual(status, instance.Status) {
+			instance.Status = status
+
+			if err := r.client.Status().Update(ctx, instance); err != nil {
+				slog.Errorf("Failed to update record status: %v", err)
+			}
+		}
+
 		if instance.GetDeletionTimestamp() == nil {
 			slog.Debugf("Checking Cloudflare DNS record: %v %s", rr.Type, rr.Name)
 

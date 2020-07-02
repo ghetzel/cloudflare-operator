@@ -11,7 +11,17 @@ spec:
     singular: cloudflarerecord
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.type
+      name: Type
+      type: string
+    - jsonPath: .status.proxied
+      name: Proxied
+      type: boolean
+    - jsonPath: .status.content
+      name: Target
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: CloudflareRecord is the Schema for the cloudflarerecords API
@@ -113,6 +123,8 @@ spec:
                 type: string
               zone:
                 type: string
+              zone_id:
+                type: string
             required:
             - content
             - name
@@ -122,6 +134,7 @@ spec:
             - ttl
             - type
             - zone
+            - zone_id
             type: object
         type: object
     served: true

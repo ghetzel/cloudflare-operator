@@ -67,6 +67,7 @@ type CloudflareRecordStatus struct {
 	TTL      int        `json:"ttl"`
 	Priority int        `json:"priority"`
 	Proxied  bool       `json:"proxied"`
+	ZoneID   string     `json:"zone_id"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -74,6 +75,9 @@ type CloudflareRecordStatus struct {
 // CloudflareRecord is the Schema for the cloudflarerecords API
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=cloudflarerecords,scope=Namespaced
+// +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.status.type`
+// +kubebuilder:printcolumn:name="Proxied",type=boolean,JSONPath=`.status.proxied`
+// +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.status.content`
 type CloudflareRecord struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
