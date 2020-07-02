@@ -45,6 +45,9 @@ type CloudflareRecordSpec struct {
 	Service string `json:"service"`
 
 	// +kubebuilder:validation:Optional
+	Ingress string `json:"ingress"`
+
+	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Default=1
 	TTL int `json:"ttl"`
 

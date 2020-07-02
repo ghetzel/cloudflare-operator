@@ -12,6 +12,7 @@ import (
 	"github.com/ghetzel/go-stockutil/sliceutil"
 	"github.com/ghetzel/go-stockutil/stringutil"
 	corev1 "k8s.io/api/core/v1"
+	extv1 "k8s.io/api/extensions/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,6 +28,8 @@ import (
 const cloudflareRecordFinalizer = `finalizer.cloudflarerecord.cloudflare-operator.gary.cool`
 
 var log = logf.Log.WithName("controller_cloudflarerecord")
+
+type targetAddressFunc func(ctx context.Context, key client.ObjectKey) (string, error)
 
 // Add creates a new CloudflareRecord Controller and adds it to the Manager. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
@@ -73,6 +76,8 @@ type ReconcileCloudflareRecord struct {
 func (r *ReconcileCloudflareRecord) Reconcile(request reconcile.Request) (reconcile.Result, error) {
 	var ctx = context.Background()
 
+	slog.SetLevel(slog.DEBUG)
+
 	// Fetch the CloudflareRecord instance
 	var instance = new(cloudflareoperatorv1alpha1.CloudflareRecord)
 	err := r.client.Get(ctx, request.NamespacedName, instance)
@@ -93,52 +98,42 @@ func (r *ReconcileCloudflareRecord) Reconcile(request reconcile.Request) (reconc
 	}
 
 	var targetAddress string
+	var objspec string
+	var tafunc targetAddressFunc
 
-	// if the instance names a service, now is the time to retrieve that service
 	if instance.Spec.Service != `` {
-		var service = new(corev1.Service)
-		var svcNamespace, svcName = stringutil.SplitPairTrailing(instance.Spec.Service, `/`)
+		objspec = instance.Spec.Service
+		tafunc = r.targetAddressFromService
+	} else if instance.Spec.Ingress != `` {
+		objspec = instance.Spec.Ingress
+		tafunc = r.targetAddressFromIngress
+	}
 
-		if svcNamespace == `` {
-			svcNamespace = instance.Namespace
+	if tafunc != nil {
+		var ns, name = stringutil.SplitPairTrailing(objspec, `/`)
+
+		if ns == `` {
+			ns = instance.Namespace
 		}
 
-		if err := r.client.Get(ctx, client.ObjectKey{
-			Namespace: svcNamespace,
-			Name:      svcName,
-		}, service); err == nil {
-
-			switch service.Spec.Type {
-			case corev1.ServiceTypeLoadBalancer:
-				for _, ingress := range service.Status.LoadBalancer.Ingress {
-					if ingress.Hostname != `` {
-						targetAddress = ingress.Hostname
-						break
-					} else if ingress.IP != `` {
-						targetAddress = ingress.IP
-						break
-					}
-				}
-			case corev1.ServiceTypeExternalName:
-				if en := service.Spec.ExternalName; en != `` {
-					targetAddress = en
-				}
-			default:
-				if cip := service.Spec.ClusterIP; cip != `` {
-					targetAddress = cip
-				}
-			}
+		if ta, err := tafunc(ctx, client.ObjectKey{
+			Namespace: ns,
+			Name:      name,
+		}); err == nil {
+			targetAddress = ta
 		} else {
 			return reconcile.Result{}, err
 		}
 
-		if targetAddress == `` {
-			return reconcile.Result{}, fmt.Errorf("Service target specified, but no usable address found")
-		}
 	}
 
 	if targetAddress == `` {
 		targetAddress = instance.Spec.Content
+	}
+
+	if targetAddress == `` {
+		slog.Errorf("Service target %q: but no usable address found", objspec)
+		return reconcile.Result{}, nil
 	}
 
 	// get the zone referred to by the instance we're reconciling
@@ -202,6 +197,53 @@ func (r *ReconcileCloudflareRecord) Reconcile(request reconcile.Request) (reconc
 	} else {
 		return reconcile.Result{}, err
 	}
+}
+
+func (r *ReconcileCloudflareRecord) targetAddressFromService(ctx context.Context, key client.ObjectKey) (string, error) {
+	var service = new(corev1.Service)
+
+	if err := r.client.Get(ctx, key, service); err == nil {
+		switch service.Spec.Type {
+		case corev1.ServiceTypeLoadBalancer:
+			for _, ingress := range service.Status.LoadBalancer.Ingress {
+				if ingress.Hostname != `` {
+					return ingress.Hostname, nil
+				} else if ingress.IP != `` {
+					return ingress.IP, nil
+				}
+			}
+		case corev1.ServiceTypeExternalName:
+			if en := service.Spec.ExternalName; en != `` {
+				return en, nil
+			}
+		default:
+			if cip := service.Spec.ClusterIP; cip != `` {
+				return cip, nil
+			}
+		}
+	} else {
+		return ``, err
+	}
+
+	return ``, fmt.Errorf("no suitable service address found")
+}
+
+func (r *ReconcileCloudflareRecord) targetAddressFromIngress(ctx context.Context, key client.ObjectKey) (string, error) {
+	var ingress = new(extv1.Ingress)
+
+	if err := r.client.Get(ctx, key, ingress); err == nil {
+		for _, iglb := range ingress.Status.LoadBalancer.Ingress {
+			if iglb.Hostname != `` {
+				return iglb.Hostname, nil
+			} else if iglb.IP != `` {
+				return iglb.IP, nil
+			}
+		}
+	} else {
+		return ``, err
+	}
+
+	return ``, fmt.Errorf("no suitable service address found")
 }
 
 func (r *ReconcileCloudflareRecord) setupCloudflareClient() error {

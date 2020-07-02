@@ -33,6 +33,8 @@ spec:
             properties:
               content:
                 type: string
+              ingress:
+                type: string
               name:
                 type: string
               priority:
